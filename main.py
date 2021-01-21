@@ -4,8 +4,7 @@
 """Download historical candlestick data for all trading pairs on Binance.com.
 All trading pair data is checked for integrity, sorted and saved as both a CSV
 and a Parquet file. The CSV files act as a raw buffer on every update round.
-The Parquet files are much more space efficient (~50GB vs ~10GB) and are
-therefore the files used to upload to Kaggle after each run.
+The Parquet files are much more space efficient (~50GB vs ~10GB).
 """
 
 __author__ = 'GOSUTO.AI'
@@ -22,6 +21,8 @@ import pandas as pd
 
 import preprocessing as pp
 
+import argparse
+
 API_BASE = 'https://api.binance.com/api/v3/'
 
 LABELS = [
@@ -37,6 +38,9 @@ LABELS = [
     'taker_buy_base_asset_volume',
     'taker_buy_quote_asset_volume',
     'ignore'
+]
+
+TRADES_LABELS = [
 ]
 
 METADATA = {
@@ -99,7 +103,7 @@ def get_batch(symbol, interval='1m', start_time=0, limit=1000):
     return pd.DataFrame([])
 
 
-def all_candles_to_csv(base, quote, interval='1m'):
+def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
     """Collect a list of candlestick batches with all candlesticks of a trading pair,
     concat into a dataframe and write it to CSV.
     """
@@ -148,18 +152,20 @@ def all_candles_to_csv(base, quote, interval='1m'):
         covering_spaces = 20 * ' '
         print(datetime.now(), base, quote, interval, str(last_datetime)+covering_spaces, end='\r', flush=True)
 
-    # write clean version of csv to parquet
-    parquet_name = f'{base}-{quote}.parquet'
-    full_path = f'compressed/{parquet_name}'
     df = pd.concat(batches, ignore_index=True)
     df = pp.quick_clean(df)
-    pp.write_raw_to_parquet(df, full_path)
-    METADATA['data'].append({
-        'description': f'All trade history for the pair {base} and {quote} at 1 minute intervals. Counts {df.index.size} records.',
-        'name': parquet_name,
-        'totalBytes': os.stat(full_path).st_size,
-        'columns': []
-    })
+
+    if with_parquet:
+        # write clean version of csv to parquet
+        parquet_name = f'{base}-{quote}.parquet'
+        full_path = f'compressed/{parquet_name}'
+        pp.write_raw_to_parquet(df, full_path)
+        METADATA['data'].append({
+            'description': f'All trade history for the pair {base} and {quote} at 1 minute intervals. Counts {df.index.size} records.',
+            'name': parquet_name,
+            'totalBytes': os.stat(full_path).st_size,
+            'columns': []
+        })
 
     # in the case that new data was gathered write it to disk
     if len(batches) > 1:
@@ -167,16 +173,30 @@ def all_candles_to_csv(base, quote, interval='1m'):
         return len(df.index) - old_lines
     return 0
 
+def Arguments():
+    parser = argparse.ArgumentParser(description="Download historical candlestick data for all available trading pairs and historical trades, @see https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md to understand related parameters")
+    
+    parser.add_argument('-t', '--type', help='Provide which data to fetch klines|historicalTrades (default klines)', default='klines')
+    parser.add_argument('-p', '--pairs', help='Provide pair names to fetch (default all)', default='all')
+    parser.add_argument('-i', '--interval', help='Set time frame interval (default 1m) only if type is klines', default='1m')
+    parser.add_argument('--parquet', help='Build parquet as well (default False)', default=False, type=bool)
+    parser.add_argument('--upload', help='Upload parquet to kaggle (default False)', default=False, type=bool)
+    args = parser.parse_args()
+    return args
 
 def main():
-    """Main loop; loop over all currency pairs that exist on the exchange. Once done upload the
-    compressed (Parquet) dataset to Kaggle.
+    """Main loop; loop over all currency pairs that exist on the exchange.
     """
 
+    args = Arguments()
+    print(args)
+    with_parquet = args.parquet
+    upload_parquet = args.upload
+    #exit()
     # get all pairs currently available
-    all_symbols = pd.DataFrame(requests.get(f'{API_BASE}exchangeInfo').json()['symbols'])
-    all_pairs = [tuple(x) for x in all_symbols[['baseAsset', 'quoteAsset']].to_records(index=False)]
-
+    #all_symbols = pd.DataFrame(requests.get(f'{API_BASE}exchangeInfo').json()['symbols'])
+    #all_pairs = [tuple(x) for x in all_symbols[['baseAsset', 'quoteAsset']].to_records(index=False)]
+    all_pairs = [('DF', 'ETH')]
     # randomising order helps during testing and doesn't make any difference in production
     random.shuffle(all_pairs)
 
@@ -188,7 +208,7 @@ def main():
     n_count = len(all_pairs)
     for n, pair in enumerate(all_pairs, 1):
         base, quote = pair
-        new_lines = all_candles_to_csv(base=base, quote=quote)
+        new_lines = all_candles_to_csv(base=base, quote=quote, with_parquet=with_parquet)
         if new_lines > 0:
             print(f'{datetime.now()} {n}/{n_count} Wrote {new_lines} new lines to file for {base}-{quote}')
         else:
@@ -199,11 +219,12 @@ def main():
         os.remove('compressed/.DS_Store')
     except FileNotFoundError:
         pass
-    write_metadata(n_count)
-    yesterday = date.today() - timedelta(days=1)
-    subprocess.run(['kaggle', 'datasets', 'version', '-p', 'compressed/', '-m', f'full update of all {n_count} pairs up to {str(yesterday)}'])
-    os.remove('compressed/dataset-metadata.json')
 
+    if with_parquet and upload_parquet:
+        write_metadata(n_count)
+        yesterday = date.today() - timedelta(days=1)
+        subprocess.run(['kaggle', 'datasets', 'version', '-p', 'compressed/', '-m', f'full update of all {n_count} pairs up to {str(yesterday)}'])
+        os.remove('compressed/dataset-metadata.json')
 
 if __name__ == '__main__':
     main()
