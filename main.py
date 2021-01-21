@@ -110,7 +110,7 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
 
     # see if there is any data saved on disk already
     try:
-        batches = [pd.read_csv(f'data/{base}-{quote}.csv')]
+        batches = [pd.read_csv(f'data/{base}-{quote}_interval-{interval}.csv')]
         last_timestamp = batches[-1]['open_time'].max()
     except FileNotFoundError:
         batches = [pd.DataFrame([], columns=LABELS)]
@@ -161,7 +161,7 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
         full_path = f'compressed/{parquet_name}'
         pp.write_raw_to_parquet(df, full_path)
         METADATA['data'].append({
-            'description': f'All trade history for the pair {base} and {quote} at 1 minute intervals. Counts {df.index.size} records.',
+            'description': f'All trade history for the pair {base} and {quote} at {interval} intervals. Counts {df.index.size} records.',
             'name': parquet_name,
             'totalBytes': os.stat(full_path).st_size,
             'columns': []
@@ -169,7 +169,7 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
 
     # in the case that new data was gathered write it to disk
     if len(batches) > 1:
-        df.to_csv(f'data/{base}-{quote}.csv', index=False)
+        df.to_csv(f'data/{base}-{quote}_interval-{interval}.csv', index=False)
         return len(df.index) - old_lines
     return 0
 
@@ -211,9 +211,9 @@ def main():
         base, quote = pair
         new_lines = all_candles_to_csv(base=base, quote=quote, interval=interval, with_parquet=with_parquet)
         if new_lines > 0:
-            print(f'{datetime.now()} {n}/{n_count} Wrote {new_lines} new lines to file for {base}-{quote}')
+            print(f'{datetime.now()} {n}/{n_count} Wrote {new_lines} new lines to file for {base}-{quote}_interval-{interval}')
         else:
-            print(f'{datetime.now()} {n}/{n_count} Already up to date with {base}-{quote}')
+            print(f'{datetime.now()} {n}/{n_count} Already up to date with {base}-{quote}_interval-{interval}')
 
     # clean the data folder and upload a new version of the dataset to kaggle
     try:
