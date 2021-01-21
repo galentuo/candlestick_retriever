@@ -192,6 +192,7 @@ def main():
     print(args)
     with_parquet = args.parquet
     upload_parquet = args.upload
+    interval = args.interval
     #exit()
     # get all pairs currently available
     #all_symbols = pd.DataFrame(requests.get(f'{API_BASE}exchangeInfo').json()['symbols'])
@@ -208,7 +209,7 @@ def main():
     n_count = len(all_pairs)
     for n, pair in enumerate(all_pairs, 1):
         base, quote = pair
-        new_lines = all_candles_to_csv(base=base, quote=quote, with_parquet=with_parquet)
+        new_lines = all_candles_to_csv(base=base, quote=quote, interval=interval, with_parquet=with_parquet)
         if new_lines > 0:
             print(f'{datetime.now()} {n}/{n_count} Wrote {new_lines} new lines to file for {base}-{quote}')
         else:
