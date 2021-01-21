@@ -50,26 +50,26 @@ def set_dtypes_compressed(df):
     return df
 
 
-def assert_integrity(df):
+def assert_integrity(df, field='open_time'):
     """make sure no rows have empty cells or duplicate timestamps exist"""
 
     assert df.isna().all(axis=1).any() == False
-    assert df['open_time'].duplicated().any() == False
+    assert df[field].duplicated().any() == False
 
 
-def quick_clean(df):
+def quick_clean(df, field='open_time'):
     """clean a raw dataframe"""
 
     # drop dupes
-    dupes = df['open_time'].duplicated().sum()
+    dupes = df[field].duplicated().sum()
     if dupes > 0:
-        df = df[df['open_time'].duplicated() == False]
+        df = df[df[field].duplicated() == False]
 
     # sort by timestamp, oldest first
-    df.sort_values(by=['open_time'], ascending=False)
+    df.sort_values(by=[field], ascending=False)
 
     # just a doublcheck
-    assert_integrity(df)
+    assert_integrity(df, field=field)
 
     return df
 
@@ -114,3 +114,19 @@ def compress_data(dirname='data'):
             new_filename = filename.replace('.csv', '.parquet')
             new_full_path = f'compressed/{new_filename}'
             write_raw_to_parquet(df, new_full_path)
+
+
+def prepare_df(data, field):
+    df = pd.concat(data, ignore_index=True)
+    df = quick_clean(df, field=field)
+    return df
+
+def append_to_csv(df, filepath, append_mode=True):
+    if append_mode:
+        try:
+            with open(filepath) as f:
+                df.to_csv(filepath, mode='a', index=False, header=False)
+        except IOError:
+            df.to_csv(filepath, index=False)
+    else:
+        df.to_csv(filepath, index=False)
