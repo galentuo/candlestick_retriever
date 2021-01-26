@@ -7,21 +7,23 @@ and a Parquet file. The CSV files act as a raw buffer on every update round.
 The Parquet files are much more space efficient (~50GB vs ~10GB).
 """
 
-__author__ = 'GOSUTO.AI'
+__author__ = 'GOSUTO.AI, github.com/aliel'
 
-import json
 import os
-import random
 import subprocess
+import json
+import random
+
 import time
 from datetime import date, datetime, timedelta
 
 import requests
+import hashlib
+
 import pandas as pd
 
-import preprocessing as pp
-
-import argparse
+import src.preprocessing as pp
+from src.args import get_args
 
 API_BASE = 'https://api.binance.com/api/v3/'
 
@@ -40,8 +42,6 @@ LABELS = [
     'ignore'
 ]
 
-TRADES_LABELS = [
-]
 
 METADATA = {
     'id': 'jorijnsmit/binance-full-history',
@@ -58,6 +58,9 @@ METADATA = {
     'data': []
 }
 
+API_KEY = None
+API_SECRET = None
+
 def write_metadata(n_count):
     """Write the metadata file dynamically so we can include a pair count."""
 
@@ -68,53 +71,160 @@ def write_metadata(n_count):
         json.dump(METADATA, file, indent=4)
 
 
-def get_batch(symbol, interval='1m', start_time=0, limit=1000):
+def get_batch(params=None, api_path='klines', timeout=30):
     """Use a GET request to retrieve a batch of candlesticks. Process the JSON into a pandas
     dataframe and return it. If not successful, return an empty dataframe.
     """
-
-    params = {
-        'symbol': symbol,
-        'interval': interval,
-        'startTime': start_time,
-        'limit': limit
-    }
+        
     try:
-        # timeout should also be given as a parameter to the function
-        response = requests.get(f'{API_BASE}klines', params, timeout=30)
+        headers = None
+        # pass credential if needed
+        if API_KEY != None and API_SECRET != None:
+            servertime = requests.get(f'{API_BASE}time')
+            servertimeobject = json.loads(servertime.text)
+            servertimeint = servertimeobject['serverTime']
+            hashedsig = hashlib.sha256(API_SECRET.encode('utf-8'))
+            params['signiature'] = hashedsig
+            params['timestamp'] = servertimeint
+            headers = {'X-MBX-APIKEY': API_KEY}
+        response = requests.get(f'{API_BASE}{api_path}', params, timeout=timeout, headers=headers)
+        
     except requests.exceptions.ConnectionError:
         print('Connection error, Cooling down for 5 mins...')
         time.sleep(5 * 60)
-        return get_batch(symbol, interval, start_time, limit)
+        return get_batch(params, api_path, timeout)
     
     except requests.exceptions.Timeout:
         print('Timeout, Cooling down for 5 min...')
         time.sleep(5 * 60)
-        return get_batch(symbol, interval, start_time, limit)
+        return get_batch(params, api_path, timeout)
     
     except requests.exceptions.ConnectionResetError:
         print('Connection reset by peer, Cooling down for 5 min...')
         time.sleep(5 * 60)
-        return get_batch(symbol, interval, start_time, limit)
+        return get_batch(params, api_path, timeout)
 
     if response.status_code == 200:
-        return pd.DataFrame(response.json(), columns=LABELS)
+        if api_path == 'klines':
+            return pd.DataFrame(response.json(), columns=LABELS)
+        else:
+            return pd.DataFrame(response.json())
+
     print(f'Got erroneous response back: {response}')
     return pd.DataFrame([])
 
-
-def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
+def all_trade_to_csv(base, quote, params=None, with_parquet=False):
     """Collect a list of candlestick batches with all candlesticks of a trading pair,
     concat into a dataframe and write it to CSV.
     """
 
+    args = get_args()
+    filepath = f'data/trade_{base}-{quote}.csv'
+
+    api_path = 'aggTrades'
+
     # see if there is any data saved on disk already
     try:
-        batches = [pd.read_csv(f'data/{base}-{quote}_interval-{interval}.csv')]
+        if params['fromId'] == 0:
+            batches = [pd.read_csv(filepath)]
+            last_id = batches[-1]['a'].max()
+            params['fromId'] = last_id + 1
+        else:
+            last_id = params['fromId']
+            params['fromId'] = last_id + 1
+        batches = [pd.DataFrame([])] # clear
+        # if already have data start from last_id
+    except FileNotFoundError:
+        batches = [pd.DataFrame([])]
+        last_id = params['fromId']
+
+
+    old_lines = len(batches[-1].index)
+
+    # gather all trades available, starting from the last id loaded from disk or provided fromId
+    # stop if the id that comes back from the api is the same as the last one
+    previous_id = -1
+
+    while previous_id != last_id:
+        # stop if we reached data
+        if previous_id >= last_id and previous_id > 0:
+            break
+
+        previous_id = last_id
+
+        new_batch = get_batch(
+            params=params,
+            api_path=api_path,
+            timeout=args.timeout
+        )
+
+        # requesting candles from the future returns empty
+        # also stop in case response code was not 200
+        if new_batch.empty:
+            break
+
+        last_id = new_batch['a'].max()
+        print(last_id, previous_id)
+        timestamp = new_batch['T'].max()
+
+        # update fromId to continue from last id
+        params['fromId'] = last_id + 1;
+
+        batches.append(new_batch)
+        last_datetime = datetime.fromtimestamp(timestamp / 1000)
+
+        covering_spaces = 20 * ' '
+        print(datetime.now(), base, quote, str(last_datetime)+covering_spaces, end='\r', flush=True)
+
+        # if huge data
+        # compute size @TODO get field not hardcoded
+        lines = len(batches)*params['limit']
+        if lines >= 5000:
+            df = pp.prepare_df(batches, field='a');
+            pp.append_to_csv(df, filepath)
+            # reset
+            batches.clear()
+
+
+    if len(batches) > 1:
+        df = pp.prepare_df(batches, field='a')
+
+    if with_parquet:
+        # write clean version of csv to parquet
+        parquet_name = f'{base}-{quote}.parquet'
+        full_path = f'compressed/{parquet_name}'
+        pp.write_raw_to_parquet(df, full_path)
+        METADATA['data'].append({
+            'description': f'All {data_type} history for the pair {base} and {quote} at {interval} intervals. Counts {df.index.size} records.',
+            'name': parquet_name,
+            'totalBytes': os.stat(full_path).st_size,
+            'columns': []
+        })
+
+    # in the case that new data was gathered write it to disk
+    if len(batches) > 1:
+        pp.append_to_csv(df, filepath)
+        #df.to_csv(filepath, index=False)
+        return len(df.index) - old_lines
+    return 0
+    
+def all_candle_to_csv(base, quote, params=None, interval='1m', with_parquet=False):
+    """Collect a list of candlestick batches with all candlesticks of a trading pair,
+    concat into a dataframe and write it to CSV.
+    """
+
+    filepath = f'data/candle_{base}-{quote}_interval-{interval}.csv'
+
+    api_path = 'klines'
+
+    # see if there is any data saved on disk already
+    try:
+        batches = [pd.read_csv(filepath)]
         last_timestamp = batches[-1]['open_time'].max()
     except FileNotFoundError:
         batches = [pd.DataFrame([], columns=LABELS)]
-        last_timestamp = 0
+        last_timestamp = params['startTime']
+
     old_lines = len(batches[-1].index)
 
     # gather all candlesticks available, starting from the last timestamp loaded from disk or 0
@@ -128,19 +238,20 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
 
         previous_timestamp = last_timestamp
 
-        new_batch = get_batch(
-            symbol=base+quote,
-            interval=interval,
-            start_time=last_timestamp+1
-        )
+        params['startTime'] = last_timestamp + 1
 
+        new_batch = get_batch(
+            params=params,
+            api_path=api_path
+        )
+        
         # requesting candles from the future returns empty
         # also stop in case response code was not 200
         if new_batch.empty:
             break
 
         last_timestamp = new_batch['open_time'].max()
-
+            
         # sometimes no new trades took place yet on date.today();
         # in this case the batch is nothing new
         if previous_timestamp == last_timestamp:
@@ -152,8 +263,15 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
         covering_spaces = 20 * ' '
         print(datetime.now(), base, quote, interval, str(last_datetime)+covering_spaces, end='\r', flush=True)
 
-    df = pd.concat(batches, ignore_index=True)
-    df = pp.quick_clean(df)
+        lines = len(batches)*params['limit']
+        if lines >= 5000:
+            df = pp.prepare_df(batches, field='open_time');
+            pp.append_to_csv(df, filepath)
+            # reset
+            batches.clear()
+
+    if len(batches) > 1:
+        df = pp.prepare_df(batches, field='open_time')
 
     if with_parquet:
         # write clean version of csv to parquet
@@ -161,7 +279,7 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
         full_path = f'compressed/{parquet_name}'
         pp.write_raw_to_parquet(df, full_path)
         METADATA['data'].append({
-            'description': f'All trade history for the pair {base} and {quote} at {interval} intervals. Counts {df.index.size} records.',
+            'description': f'All {data_type} history for the pair {base} and {quote} at {interval} intervals. Counts {df.index.size} records.',
             'name': parquet_name,
             'totalBytes': os.stat(full_path).st_size,
             'columns': []
@@ -169,35 +287,69 @@ def all_candles_to_csv(base, quote, interval='1m', with_parquet=False):
 
     # in the case that new data was gathered write it to disk
     if len(batches) > 1:
-        df.to_csv(f'data/{base}-{quote}_interval-{interval}.csv', index=False)
+        pp.append_to_csv(df, filepath)
+        #df.to_csv(filepath, index=False)
         return len(df.index) - old_lines
     return 0
 
-def Arguments():
-    parser = argparse.ArgumentParser(description="Download historical candlestick data for all available trading pairs and historical trades, @see https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md to understand related parameters")
+def get_historical_candlesticks(base, quote):
+    args = get_args()
+
+    with_parquet = args.parquet
     
-    parser.add_argument('-t', '--type', help='Provide which data to fetch klines|historicalTrades (default klines)', default='klines')
-    parser.add_argument('-p', '--pairs', help='Provide pair names to fetch (default all)', default='all')
-    parser.add_argument('-i', '--interval', help='Set time frame interval (default 1m) only if type is klines', default='1m')
-    parser.add_argument('--parquet', help='Build parquet as well (default False)', default=False, type=bool)
-    parser.add_argument('--upload', help='Upload parquet to kaggle (default False)', default=False, type=bool)
-    args = parser.parse_args()
-    return args
+    symbol = base+quote
+    interval = args.interval
+    start_at = args.start_at
+    limit = args.limit
+    
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'startTime': start_at,
+        'limit': limit
+    }
+
+    return all_candle_to_csv(base=base, quote=quote, params=params,
+                             interval=interval, with_parquet=with_parquet)
+
+def get_historical_agg_trades(base, quote):
+    args = get_args()
+
+    with_parquet = args.parquet
+    
+    symbol = base+quote
+    start_at = args.start_at
+    limit = args.limit
+    
+    params = {
+        'symbol': symbol,
+        'fromId': start_at,
+        'limit': limit
+    }
+    
+    return all_trade_to_csv(base=base, quote=quote, params=params, with_parquet=with_parquet)
 
 def main():
     """Main loop; loop over all currency pairs that exist on the exchange.
     """
-
-    args = Arguments()
+    args = get_args()
     print(args)
+
     with_parquet = args.parquet
     upload_parquet = args.upload
     interval = args.interval
-    #exit()
-    # get all pairs currently available
-    #all_symbols = pd.DataFrame(requests.get(f'{API_BASE}exchangeInfo').json()['symbols'])
-    #all_pairs = [tuple(x) for x in all_symbols[['baseAsset', 'quoteAsset']].to_records(index=False)]
-    all_pairs = [('DF', 'ETH')]
+    data_type = args.dtype
+    pairs = "".join(args.pairs.split()) # remove whitespace 
+
+    if pairs == 'all':
+        # get all pairs currently available
+        all_symbols = pd.DataFrame(requests.get(f'{API_BASE}exchangeInfo').json()['symbols'])
+        all_pairs = [tuple(x) for x in all_symbols[['baseAsset', 'quoteAsset']].to_records(index=False)]
+    else:
+        all_pairs = [tuple(pair.split('-')) for pair in pairs.split(',')]
+        #all_pairs = [('BTC', 'USDT')]
+        #all_pairs = [('DF', 'ETH')]
+
     # randomising order helps during testing and doesn't make any difference in production
     random.shuffle(all_pairs)
 
@@ -209,11 +361,19 @@ def main():
     n_count = len(all_pairs)
     for n, pair in enumerate(all_pairs, 1):
         base, quote = pair
-        new_lines = all_candles_to_csv(base=base, quote=quote, interval=interval, with_parquet=with_parquet)
+
+        # default params for klines
+        symbol = base+quote
+        if data_type == 'candle':
+            new_lines = get_historical_candlesticks(base, quote)
+
+        elif data_type == 'trade':
+            new_lines = get_historical_agg_trades(base, quote)
+
         if new_lines > 0:
-            print(f'{datetime.now()} {n}/{n_count} Wrote {new_lines} new lines to file for {base}-{quote}_interval-{interval}')
+            print(f'{datetime.now()} {n}/{n_count} Wrote {new_lines} new lines to file for {data_type}_{base}-{quote}_interval-{interval}')
         else:
-            print(f'{datetime.now()} {n}/{n_count} Already up to date with {base}-{quote}_interval-{interval}')
+            print(f'{datetime.now()} {n}/{n_count} Already up to date with {data_type}_{base}-{quote}_interval-{interval}')
 
     # clean the data folder and upload a new version of the dataset to kaggle
     try:
@@ -228,4 +388,9 @@ def main():
         os.remove('compressed/dataset-metadata.json')
 
 if __name__ == '__main__':
-    main()
+    args = get_args()
+
+    if args.check_trade != None:
+        pp.check_trade_index(args.check_trade)
+    else:
+        main()

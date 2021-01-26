@@ -130,3 +130,24 @@ def append_to_csv(df, filepath, append_mode=True):
             df.to_csv(filepath, index=False)
     else:
         df.to_csv(filepath, index=False)
+
+# check trade @TODO add ability to fix missing trades
+def check_trade_index(filepath):
+    expected_id = -1
+    missing_trade = [];
+
+    trades = pd.read_csv(filepath, low_memory = True, usecols=['a'])
+    for trade_id in trades['a']:
+        print('Check trade', expected_id, end='\r', flush=True)
+        if expected_id == -1:
+            expected_id = trade_id
+        if expected_id != trade_id:
+            missing_trade.append(expected_id)
+            # if missing, got to next to avoid lag 
+            expected_id = expected_id + 1
+            
+        expected_id = expected_id + 1;
+    print('\nDone!')
+    if len(missing_trade) > 0:
+        print('Missing trade')
+        print(missing_trade)
